@@ -98,12 +98,18 @@ stages:
               versionSpec: '20.x'
             displayName: 'Install Node.js'
 
-          - task: CmdLine@2
-            displayName: 'npm install and build'
+          - task: Npm@1
+            displayName: 'npm install'
             inputs:
-              script: |
-                npm install
-                npm run build
+              command: 'install'
+              workingDir: '$(Build.SourcesDirectory)'
+
+          - task: Npm@1
+            displayName: 'npm run build'
+            inputs:
+              command: 'custom'
+              customCommand: 'run build'
+              workingDir: '$(Build.SourcesDirectory)'
 
           - task: AzureCLI@2
             displayName: 'Login to ACR'
@@ -114,18 +120,24 @@ stages:
               inlineScript: |
                 az acr login --name $(AcrName)
 
-          - task: CmdLine@2
+          - task: PowerShell@2
             displayName: 'Build Docker Image'
             inputs:
+              targetType: 'inline'
               script: |
                 docker build -t $(AcrLoginServer)/$(ImageRepository):$(ImageTag) -t $(AcrLoginServer)/$(ImageRepository):$(ImageTagLatest) -f $(Build.SourcesDirectory)/Dockerfile $(Build.SourcesDirectory)
+              pwsh: false
+              workingDirectory: '$(Build.SourcesDirectory)'
 
-          - task: CmdLine@2
+          - task: PowerShell@2
             displayName: 'Push Image to ACR'
             inputs:
+              targetType: 'inline'
               script: |
                 docker push $(AcrLoginServer)/$(ImageRepository):$(ImageTag)
                 docker push $(AcrLoginServer)/$(ImageRepository):$(ImageTagLatest)
+              pwsh: false
+              workingDirectory: '$(Build.SourcesDirectory)'
 
   - stage: Deploy
     displayName: 'Deploy to Container Apps'
@@ -245,9 +257,11 @@ stages:
                   exit 1
                 }
 
-          - task: CmdLine@2
+          - task: PowerShell@2
             displayName: 'Deployment Summary'
             inputs:
+              targetType: 'inline'
               script: |
-                echo Deployment successful!
-                echo Access your app at: https://$(ACA_FQDN)
+                Write-Host "Deployment successful!"
+                Write-Host "Access your app at: https://$(ACA_FQDN)"
+              pwsh: false
