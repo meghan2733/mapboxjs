@@ -139,6 +139,13 @@ jobs:
 
       - name: Create or Update Container App
         run: |
+          ACR_USERNAME=$(az acr credential show \
+            --name ${{ env.ACR_NAME }} \
+            --query username -o tsv)
+          ACR_PASSWORD=$(az acr credential show \
+            --name ${{ env.ACR_NAME }} \
+            --query "passwords[0].value" -o tsv)
+
           APP_EXISTS=$(az containerapp show \
             --resource-group ${{ env.ACA_RESOURCE_GROUP }} \
             --name ${{ env.ACA_APP_NAME }} \
@@ -158,11 +165,18 @@ jobs:
               --cpu 0.5 \
               --memory 1.0Gi \
               --registry-server ${{ env.ACR_LOGIN_SERVER }} \
-              --registry-identity system \
+              --registry-username "$ACR_USERNAME" \
+              --registry-password "$ACR_PASSWORD" \
               --tags environment=prod app=mapbox
             echo "✓ Container App created"
           else
             echo "Updating existing Container App..."
+            az containerapp registry set \
+              --name ${{ env.ACA_APP_NAME }} \
+              --resource-group ${{ env.ACA_RESOURCE_GROUP }} \
+              --server ${{ env.ACR_LOGIN_SERVER }} \
+              --username "$ACR_USERNAME" \
+              --password "$ACR_PASSWORD"
             az containerapp update \
               --name ${{ env.ACA_APP_NAME }} \
               --resource-group ${{ env.ACA_RESOURCE_GROUP }} \
