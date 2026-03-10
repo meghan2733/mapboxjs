@@ -12,7 +12,6 @@ variables:
   AzureServiceConnectionName: 'Azure Subscription'
   
   # ACR Configuration
-  AcrSubscription: 'Azure Subscription'
   AcrResourceGroup: 'rg-mapbox-prod'
   AcrName: 'acrmapboxprod'
   AcrLoginServer: 'acrmapboxprod.azurecr.io'
@@ -103,22 +102,26 @@ stages:
               npm run build
             displayName: 'npm install and build'
 
-          - task: Docker@2
+          - task: AzureCLI@2
             displayName: 'Login to ACR'
             inputs:
-              command: 'login'
-              containerRegistry: '$(AcrSubscription)'
+              azureSubscription: '$(AzureServiceConnectionName)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az acr login --name $(AcrName)
 
-          - task: Docker@2
-            displayName: 'Build and Push Image to ACR'
-            inputs:
-              command: 'buildAndPush'
-              repository: '$(ImageRepository)'
-              dockerfile: '$(Build.SourcesDirectory)/Dockerfile'
-              containerRegistry: '$(AcrSubscription)'
-              tags: |
-                $(ImageTag)
-                $(ImageTagLatest)
+          - script: |
+              docker build -t $(AcrLoginServer)/$(ImageRepository):$(ImageTag) \
+                           -t $(AcrLoginServer)/$(ImageRepository):$(ImageTagLatest) \
+                           -f $(Build.SourcesDirectory)/Dockerfile \
+                           $(Build.SourcesDirectory)
+            displayName: 'Build Docker Image'
+
+          - script: |
+              docker push $(AcrLoginServer)/$(ImageRepository):$(ImageTag)
+              docker push $(AcrLoginServer)/$(ImageRepository):$(ImageTagLatest)
+            displayName: 'Push Image to ACR'
 
   - stage: Deploy
     displayName: 'Deploy to Container Apps'
