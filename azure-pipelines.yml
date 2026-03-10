@@ -111,14 +111,10 @@ stages:
               customCommand: 'run build'
               workingDir: '$(Build.SourcesDirectory)'
 
-          - task: AzureCLI@2
+          - task: CmdLine@2
             displayName: 'Login to ACR'
             inputs:
-              azureSubscription: '$(AzureServiceConnectionName)'
-              scriptType: 'pscore'
-              scriptLocation: 'inlineScript'
-              inlineScript: |
-                az acr login --name $(AcrName)
+              script: az acr login --name $(AcrName)
 
           - task: CmdLine@2
             displayName: 'Build Docker Image'
