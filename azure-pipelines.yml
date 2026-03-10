@@ -98,10 +98,12 @@ stages:
               versionSpec: '20.x'
             displayName: 'Install Node.js'
 
-          - script: |
-              npm install
-              npm run build
+          - task: CmdLine@2
             displayName: 'npm install and build'
+            inputs:
+              script: |
+                npm install
+                npm run build
 
           - task: AzureCLI@2
             displayName: 'Login to ACR'
@@ -112,17 +114,18 @@ stages:
               inlineScript: |
                 az acr login --name $(AcrName)
 
-          - script: |
-              docker build -t $(AcrLoginServer)/$(ImageRepository):$(ImageTag) \
-                           -t $(AcrLoginServer)/$(ImageRepository):$(ImageTagLatest) \
-                           -f $(Build.SourcesDirectory)/Dockerfile \
-                           $(Build.SourcesDirectory)
+          - task: CmdLine@2
             displayName: 'Build Docker Image'
+            inputs:
+              script: |
+                docker build -t $(AcrLoginServer)/$(ImageRepository):$(ImageTag) -t $(AcrLoginServer)/$(ImageRepository):$(ImageTagLatest) -f $(Build.SourcesDirectory)/Dockerfile $(Build.SourcesDirectory)
 
-          - script: |
-              docker push $(AcrLoginServer)/$(ImageRepository):$(ImageTag)
-              docker push $(AcrLoginServer)/$(ImageRepository):$(ImageTagLatest)
+          - task: CmdLine@2
             displayName: 'Push Image to ACR'
+            inputs:
+              script: |
+                docker push $(AcrLoginServer)/$(ImageRepository):$(ImageTag)
+                docker push $(AcrLoginServer)/$(ImageRepository):$(ImageTagLatest)
 
   - stage: Deploy
     displayName: 'Deploy to Container Apps'
@@ -242,7 +245,9 @@ stages:
                   exit 1
                 }
 
-          - script: |
-              echo "Deployment successful!"
-              echo "Access your app at: https://$(ACA_FQDN)"
+          - task: CmdLine@2
             displayName: 'Deployment Summary'
+            inputs:
+              script: |
+                echo Deployment successful!
+                echo Access your app at: https://$(ACA_FQDN)
