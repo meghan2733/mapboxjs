@@ -120,23 +120,18 @@ stages:
               inlineScript: |
                 az acr login --name $(AcrName)
 
-          - task: PowerShell@2
+          - task: CmdLine@2
             displayName: 'Build Docker Image'
             inputs:
-              targetType: 'inline'
-              script: |
-                docker build -t $(AcrLoginServer)/$(ImageRepository):$(ImageTag) -t $(AcrLoginServer)/$(ImageRepository):$(ImageTagLatest) -f $(Build.SourcesDirectory)/Dockerfile $(Build.SourcesDirectory)
-              pwsh: false
+              script: docker build -t $(AcrLoginServer)/$(ImageRepository):$(ImageTag) -t $(AcrLoginServer)/$(ImageRepository):$(ImageTagLatest) -f $(Build.SourcesDirectory)\Dockerfile $(Build.SourcesDirectory)
               workingDirectory: '$(Build.SourcesDirectory)'
 
-          - task: PowerShell@2
+          - task: CmdLine@2
             displayName: 'Push Image to ACR'
             inputs:
-              targetType: 'inline'
               script: |
                 docker push $(AcrLoginServer)/$(ImageRepository):$(ImageTag)
                 docker push $(AcrLoginServer)/$(ImageRepository):$(ImageTagLatest)
-              pwsh: false
               workingDirectory: '$(Build.SourcesDirectory)'
 
   - stage: Deploy
@@ -257,11 +252,9 @@ stages:
                   exit 1
                 }
 
-          - task: PowerShell@2
+          - task: CmdLine@2
             displayName: 'Deployment Summary'
             inputs:
-              targetType: 'inline'
               script: |
-                Write-Host "Deployment successful!"
-                Write-Host "Access your app at: https://$(ACA_FQDN)"
-              pwsh: false
+                echo Deployment successful!
+                echo Access your app at: https://$(ACA_FQDN)
