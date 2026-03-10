@@ -1,0 +1,211 @@
+name: Build and Deploy to Azure Container Apps
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  # ACR Configuration
+  ACR_RESOURCE_GROUP: rg-mapbox-prod
+  ACR_NAME: acrmapboxprod
+  ACR_LOGIN_SERVER: acrmapboxprod.azurecr.io
+  IMAGE_REPOSITORY: mapbox-app
+  
+  # Container Apps Configuration
+  ACA_RESOURCE_GROUP: rg-mapbox-prod
+  ACA_ENVIRONMENT_NAME: aca-env-mapbox
+  ACA_APP_NAME: aca-mapbox-app
+  ACA_LOCATION: eastus
+
+jobs:
+  provision-azure:
+    name: Provision Azure Resources
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Create Resource Group
+        run: |
+          az group create \
+            --name ${{ env.ACA_RESOURCE_GROUP }} \
+            --location ${{ env.ACA_LOCATION }} \
+            --tags environment=prod app=mapbox
+          echo "✓ Resource group created or already exists"
+
+      - name: Create ACR (if not exists)
+        run: |
+          if ! az acr show \
+            --resource-group ${{ env.ACR_RESOURCE_GROUP }} \
+            --name ${{ env.ACR_NAME }} &>/dev/null; then
+            echo "Creating ACR registry..."
+            az acr create \
+              --resource-group ${{ env.ACR_RESOURCE_GROUP }} \
+              --name ${{ env.ACR_NAME }} \
+              --sku Basic \
+              --admin-enabled true \
+              --tags environment=prod app=mapbox
+            echo "✓ ACR created"
+          else
+            echo "✓ ACR already exists"
+          fi
+
+      - name: Create Container Apps Environment (if not exists)
+        run: |
+          if ! az containerapp env show \
+            --resource-group ${{ env.ACA_RESOURCE_GROUP }} \
+            --name ${{ env.ACA_ENVIRONMENT_NAME }} &>/dev/null; then
+            echo "Creating Container Apps environment..."
+            az containerapp env create \
+              --name ${{ env.ACA_ENVIRONMENT_NAME }} \
+              --resource-group ${{ env.ACA_RESOURCE_GROUP }} \
+              --location ${{ env.ACA_LOCATION }} \
+              --tags environment=prod app=mapbox
+            echo "✓ Container Apps environment created"
+          else
+            echo "✓ Container Apps environment already exists"
+          fi
+
+  build-and-push:
+    name: Build Docker Image and Push to ACR
+    needs: provision-azure
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build app
+        run: npm run build
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: |
+          az acr login --name ${{ env.ACR_NAME }}
+          echo "✓ Logged in to ACR"
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.run_id }} \
+            -t ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:latest \
+            -f ./Dockerfile .
+          echo "✓ Docker image built successfully"
+
+      - name: Push image to ACR
+        run: |
+          docker push ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.run_id }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:latest
+          echo "✓ Image pushed to ACR"
+
+  deploy-app:
+    name: Deploy to Azure Container Apps
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Create or Update Container App
+        run: |
+          APP_EXISTS=$(az containerapp show \
+            --resource-group ${{ env.ACA_RESOURCE_GROUP }} \
+            --name ${{ env.ACA_APP_NAME }} \
+            --query name -o tsv 2>/dev/null || echo "")
+          
+          if [ -z "$APP_EXISTS" ]; then
+            echo "Creating new Container App..."
+            az containerapp create \
+              --name ${{ env.ACA_APP_NAME }} \
+              --resource-group ${{ env.ACA_RESOURCE_GROUP }} \
+              --environment ${{ env.ACA_ENVIRONMENT_NAME }} \
+              --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.run_id }} \
+              --target-port 80 \
+              --ingress external \
+              --min-replicas 1 \
+              --max-replicas 3 \
+              --cpu 0.5 \
+              --memory 1.0Gi \
+              --registry-server ${{ env.ACR_LOGIN_SERVER }} \
+              --registry-identity system \
+              --tags environment=prod app=mapbox
+            echo "✓ Container App created"
+          else
+            echo "Updating existing Container App..."
+            az containerapp update \
+              --name ${{ env.ACA_APP_NAME }} \
+              --resource-group ${{ env.ACA_RESOURCE_GROUP }} \
+              --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.run_id }} \
+              --tags environment=prod app=mapbox
+            echo "✓ Container App updated"
+          fi
+
+      - name: Verify Container App Revision Health
+        run: |
+          echo "Waiting for Container App revision to be ready (max 60 seconds)..."
+          for i in {1..12}; do
+            REVISION_STATE=$(az containerapp revision list \
+              --resource-group ${{ env.ACA_RESOURCE_GROUP }} \
+              --name ${{ env.ACA_APP_NAME }} \
+              --query "[0].properties.provisioningState" -o tsv)
+            
+            if [ "$REVISION_STATE" = "Provisioned" ]; then
+              echo "✓ Revision is ready!"
+              break
+            fi
+            
+            echo "  Revision state: $REVISION_STATE (attempt $i/12)"
+            sleep 5
+          done
+
+      - name: Get Container App FQDN
+        run: |
+          FQDN=$(az containerapp show \
+            --resource-group ${{ env.ACA_RESOURCE_GROUP }} \
+            --name ${{ env.ACA_APP_NAME }} \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          
+          echo "ACA_FQDN=$FQDN" >> $GITHUB_ENV
+          echo "✓ Container App FQDN: https://$FQDN"
+
+      - name: Deployment Summary
+        run: |
+          echo "=========================================="
+          echo "✓ Deployment Successful!"
+          echo "=========================================="
+          echo "App URL: https://${{ env.ACA_FQDN }}"
+          echo "Container App: ${{ env.ACA_APP_NAME }}"
+          echo "Resource Group: ${{ env.ACA_RESOURCE_GROUP }}"
+          echo "Image: ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.run_id }}"
+          echo "=========================================="

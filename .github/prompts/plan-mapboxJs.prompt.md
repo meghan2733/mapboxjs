@@ -1,68 +1,157 @@
-## Plan: Dockerize Vite and Publish to ACR + Deploy to ACA
+# Plan: Migrate Azure Pipelines to GitHub Actions
 
-Containerize the Vite app with a multi-stage Docker build, then update Azure Pipelines to build/push the image to ACR using Docker@2 and deploy to Azure Container Apps through an Azure Resource Manager service connection. The plan includes one-time Azure resource provisioning in the pipeline flow, uses `Build.BuildId` + `latest` image tags, and targets a single environment.
+## TL;DR
+Migrate the 3-stage Azure Pipelines CI/CD workflow to GitHub Actions using `ubuntu-latest` runners. The workflow will use Azure OIDC federated credentials for secure authentication, maintain automatic Azure resource provisioning (RG, ACR, Container Apps), build & push container images, and deploy to Azure Container Apps. Health checks will be omitted for a leaner deployment process.
 
-**Steps**
-1. Validate baseline app build behavior and artifact assumptions before containerization. Confirm `npm run build` creates `dist/` and no custom Vite output path is used. This ensures the Docker build context and runtime copy paths are correct.
-2. Add container build assets for the frontend app.
-Create `Dockerfile` with a multi-stage build: Node 20 stage to install dependencies and run Vite build, Nginx runtime stage serving static files from `/usr/share/nginx/html`. Add `.dockerignore` to exclude `node_modules`, VCS files, CI files not needed in build context, and local artifacts.
-3. Add Nginx SPA routing config for client-side navigation support.
-Create `nginx.conf` with `try_files $uri /index.html` so deep links resolve correctly in Container Apps.
-4. Define pipeline variables and tagging strategy in `azure-pipelines.yml`.
-Add variables for Azure subscription service connection name, ACR name/login server, repository/image name, resource group, Container Apps environment name, and app name. Define tags as `$(Build.BuildId)` and `latest`.
-5. Update CI/CD pipeline to build and push the Docker image to ACR.
-Use `Docker@2` with Azure service connection for login (`command: login`) and build/push (`command: buildAndPush`) against the new `Dockerfile`. Configure both tags in one pipeline run. Ensure trigger remains on `main`.
-6. Add Azure CLI steps to provision required Azure resources (if missing). *depends on 4*
-Using `AzureCLI@2` with the same ARM service connection:
-- Create resource group (idempotent)
-- Create ACR with Basic SKU if not existing
-- Create Container Apps environment if not existing
-- Ensure ACR admin/userless pull model with managed identity strategy for ACA
-7. Add deployment step to Azure Container Apps from pushed ACR image. *depends on 5,6*
-Use `AzureCLI@2` to create/update the Container App with ingress enabled and target port 80, referencing image `acrLoginServer/repository:Build.BuildId`. Configure revisions and minimum settings for a single-environment rollout.
-8. Wire ACA to pull from ACR securely (managed identity preferred). *depends on 6,7*
-Assign system/user managed identity to Container App and grant `AcrPull` role on ACR. Avoid embedded registry passwords in pipeline variables.
-9. Add post-deploy validation and rollback-safe checks.
-Include CLI checks for provisioning/deployment status, verify active revision health, and print public FQDN. Mark pipeline failure if image push or ACA rollout is unsuccessful.
-10. Document operational runbook details. *parallel with 9*
-Update `README.md` with prerequisites (service connection permissions), required pipeline variables, first-run behavior, and manual redeploy command examples.
+**Key changes:**
+- Azure DevOps → GitHub Actions YAML syntax
+- Windows agent (AISWinLocal) → ubuntu-latest Linux runner
+- PowerShell → Bash/Azure CLI
+- Azure DevOps variables → GitHub Actions secrets/environment variables
+- 3 stages → Single workflow with 3 jobs
 
-**Relevant files**
-- `/Users/meghankulkarni/mapboxjs/azure-pipelines.yml` — extend from Node build-only flow to full Docker build/push + Azure provisioning + Container Apps deployment.
-- `/Users/meghankulkarni/mapboxjs/package.json` — reuse existing `build` script (`vite build`) as source for container build stage.
-- `/Users/meghankulkarni/mapboxjs/vite.config.js` — confirm default output path assumptions used in Docker copy stage.
-- `/Users/meghankulkarni/mapboxjs/Dockerfile` — new multi-stage Node->Nginx image definition.
-- `/Users/meghankulkarni/mapboxjs/.dockerignore` — new build-context optimization and leak prevention.
-- `/Users/meghankulkarni/mapboxjs/nginx.conf` — new SPA-friendly Nginx server config for static routing.
-- `/Users/meghankulkarni/mapboxjs/README.md` — document CI/CD variables, provisioning expectations, and deployment behavior.
+---
 
-**Verification**
-1. Local container verification:
-`docker build -t vite-app:test .` and `docker run -p 8080:80 vite-app:test`, then verify app and deep-link routes (SPA fallback).
-2. Pipeline build/push verification:
-Run pipeline on `main`; confirm `Docker@2 buildAndPush` publishes both `Build.BuildId` and `latest` tags in ACR repository.
-3. Azure provisioning verification:
-Check resource creation idempotency by re-running pipeline and confirming no failures when resources already exist.
-4. Deployment verification:
-Confirm Container App revision reaches healthy state, ingress URL responds with 200, and deployed revision image matches `Build.BuildId` tag.
-5. Security verification:
-Validate ACA identity has `AcrPull` and that no plaintext registry secrets are committed to repo/pipeline YAML.
+## Steps
 
-**Decisions**
-- Build location: Azure DevOps agent with `Docker@2`.
-- Authentication: Azure Resource Manager service connection.
-- Image tagging: `Build.BuildId` and `latest`.
-- Scope: Include deployment steps (not build/push only).
-- Target runtime: Azure Container Apps.
-- Environment strategy: Single environment.
-- Infra assumption: Provisioning included in pipeline plan.
-- Included scope: containerization, CI/CD updates, Azure provisioning for required resources, deployment, verification, and documentation.
-- Excluded scope: blue/green or multi-stage environment promotion workflows, IaC refactor to Terraform/Bicep modules, advanced observability dashboards.
+### Phase 1: GitHub Actions Workflow Structure & Setup
+1. Create `.github/workflows/` directory structure
+2. Create main workflow file `.github/workflows/deploy.yml` with:
+   - Trigger: on push to main branch
+   - Environment variables: ACR name, RG, Container Apps config
+   - Secrets: Azure subscription ID, Azure client ID (for OIDC)
+3. Configure 3 jobs: `provision-azure`, `build-and-push`, `deploy-app` (with job dependencies)
+4. Set up OIDC configuration in GitHub (requires one-time Azure setup for federated credentials)
 
-**Further Considerations**
-1. Container Apps scaling defaults:
-Recommendation is min replicas `0` and max `1-3` for cost control initially; adjust after traffic baseline.
-2. Image retention policy in ACR:
-Recommendation is to keep `latest` plus last N build tags to control storage costs.
-3. Future hardening:
-Add Trivy/Defender image scan gate before deployment once base pipeline is stable.
+### Phase 2: Provision Azure Resources Job
+5. Translate Azure PowerShell scripts to Bash-compatible Azure CLI equivalents:
+   - Resource group creation
+   - ACR creation  
+   - Container Apps environment creation
+6. Replace Azure DevOps task syntax with GitHub Actions `azure/cli@v2` or `azure/login@v2`
+7. Update condition logic from YAML to GitHub Actions syntax
+
+### Phase 3: Build & Push Docker Image Job
+8. Translate build job:
+   - Replace `NodeTool@0` with `actions/setup-node@v4`
+   - Replace `Npm@1` with `npm` commands via `run:` directive
+   - Replace `CmdLine@2` Docker commands with direct `docker` commands in Linux bash
+   - Update working directory references (from Windows paths to Unix)
+9. Docker build command: adapt Windows path syntax `\Dockerfile` → `./Dockerfile`
+10. Use environment variables for image tag (GitHub Actions provides `github.run_id`)
+
+### Phase 4: Deploy to Container Apps Job
+11. Translate deployment job:
+    - ACR image pull & update logic
+    - Revision readiness polling (Bash compatible)
+    - Remove `/health` and `/` endpoint tests (per decision)
+    - Output deployment FQDN
+12. Add proper error handling and logging for readiness checks
+13. Simplify validation: just verify deployment state, skip HTTP checks
+
+### Phase 5: Syntax & Tool Translation
+14. Translate all PowerShell-specific syntax:
+    - `$LASTEXITCODE` → check exit codes with Bash
+    - String comparisons: `[string]::IsNullOrEmpty()` → `[ -z "$VAR" ]`
+    - Variable setting: `Write-Host "##vso[task.setvariable variable=X]$Y"` → `echo "X=$Y" >> $GITHUB_ENV`
+    - Loop syntax: PowerShell `for` → Bash `for`
+    - Retry/sleep logic: translate to Bash equivalents
+15. Ensure all Azure CLI commands are cross-platform compatible (they should be)
+
+### Phase 6: Environment & Secrets Configuration
+16. Update variable names:
+    - Map Azure DevOps variables to GitHub Actions equivalents
+    - Store sensitive values in GitHub repository secrets: `AZURE_SUBSCRIPTION_ID`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` (for OIDC)
+    - Store configuration in GitHub environment variables or workflow file defaults
+17. Document required secrets in a setup guide (for reference)
+
+### Phase 7: Testing & Validation
+18. Syntax validation: Verify YAML is valid using `yamllint` or GitHub's workflow validation
+19. Create test run: Trigger workflow on a test branch to validate provisioning logic
+20. Verify all resource naming conventions match (RG names, ACR names, etc.)
+21. Check Docker build succeeds on ubuntu-latest (may have different dependencies vs Windows)
+22. Confirm ACR push works with OIDC auth
+23. Verify Container Apps deployment completes and app is accessible
+24. Compare final deployment FQDN output between old and new workflow
+
+---
+
+## Relevant Files
+
+- `azure-pipelines.yml` — Source pipeline to translate (current approach)
+- `.github/workflows/deploy.yml` — New GitHub Actions workflow (to create)
+- `package.json` — Define build commands, Node.js version (20.x)
+- `Dockerfile` — Multi-stage build (Node 20-Alpine + Nginx-Alpine)
+- `nginx.conf` — Nginx routing config for SPA (should not change)
+
+---
+
+## Verification Checklist
+
+1. **Syntax validation:** Run `yamllint .github/workflows/deploy.yml` to ensure valid YAML
+2. **Workflow trigger:** Push to main branch and confirm workflow appears in Actions tab
+3. **Provision stage:**
+   - Check that resource group exists in Azure (or verify it already exists)
+   - ACR exists and is reachable at `acrmapboxprod.azurecr.io`
+   - Container Apps environment is created
+4. **Build stage:**
+   - Confirm Node modules install successfully on ubuntu-latest
+   - `npm run build` produces artifacts in `dist/`
+   - Docker image builds without errors
+   - Image is tagged with `build-id` and `latest` in ACR
+5. **Deploy stage:**
+   - Verify Container App revision reaches `Provisioned` state within timeout
+   - Container App image is updated to new tag
+   - App is accessible at the output FQDN
+   - Nginx routes SPA traffic correctly to `index.html`
+6. **Compare outputs:** Check workflow logs match expected resource IDs and URLs
+
+---
+
+## Decision Log
+
+- **Auth Method:** OpenID Connect (OIDC) with federated credentials for secure, keyless authentication (no stored secrets)
+- **Runner:** `ubuntu-latest` (hard-coded in workflow) — requires translating all PowerShell to Bash/Azure CLI
+- **Health checks:** Omitted for simplicity — only validates deployment state, not HTTP responses
+- **Resource provisioning:** Kept automatic in workflow (not moved to separate IaC pipeline)
+- **Job dependencies:** Explicit sequential execution (`needs:` keyword) — Provision → Build → Deploy
+- **Error handling:** Continue same error checking logic but adapted to Bash exit codes
+
+---
+
+## Further Considerations
+
+1. **OIDC Setup Required:** Requires one-time configuration in Azure AD / GitHub settings. Cannot be scripted from workflow and must be done beforehand.
+
+2. **Linux vs. Windows Behavior:** Docker build on ubuntu-latest (Linux) should be faster and require fewer resources than Windows agent. No known compatibility issues with the current Dockerfile.
+
+3. **Logging & Debugging:** GitHub Actions logs are more concise than Azure DevOps. Plan includes standard logging without verbose debug mode unless troubleshooting is needed.
+
+---
+
+## Implementation Sequence
+
+### ✅ Completed
+1. ✅ Create `.github/workflows/` directory
+2. ✅ Create `.github/workflows/deploy.yml` with all three jobs
+3. ✅ Create OIDC setup documentation
+4. ✅ Create GitHub secrets setup documentation
+5. ✅ Create implementation guide and quick reference
+
+### 📋 Next Steps (User Action Required)
+6. Set up GitHub repository secrets for OIDC credentials (see SECRETS-SETUP.md)
+7. Perform one-time OIDC federated credential setup in Azure AD (see OIDC-SETUP.md)
+8. Test workflow on main branch
+9. Validate each stage (provision → build → deploy)
+10. Verify app accessibility and functionality
+11. Document any environment-specific notes
+
+---
+
+## Files Delivered
+
+- **`.github/workflows/deploy.yml`** — Production-ready GitHub Actions workflow
+- **`OIDC-SETUP.md`** — Step-by-step OIDC federated credential setup
+- **`SECRETS-SETUP.md`** — GitHub secrets configuration guide
+- **`IMPLEMENTATION.md`** — Complete implementation details and troubleshooting
+- **`QUICK-REFERENCE.md`** — Quick setup checklist and common issues
