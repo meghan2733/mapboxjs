@@ -5,7 +5,7 @@ trigger:
   - main
 
 pool:
-  vmImage: ubuntu-latest
+  name: 'AISWinLocal'
 
 variables:
   # Azure Service Connection name (configure in Project Settings > Service Connections)
@@ -37,52 +37,53 @@ stages:
             displayName: 'Create Resource Group'
             inputs:
               azureSubscription: '$(AzureServiceConnectionName)'
-              scriptType: 'bash'
+              scriptType: 'pscore'
               scriptLocation: 'inlineScript'
               inlineScript: |
-                az group create \
-                  --name $(AcaResourceGroup) \
-                  --location eastus \
+                az group create `
+                  --name $(AcaResourceGroup) `
+                  --location eastus `
                   --tags environment=prod app=mapbox
 
           - task: AzureCLI@2
             displayName: 'Create ACR (if not exists)'
             inputs:
               azureSubscription: '$(AzureServiceConnectionName)'
-              scriptType: 'bash'
+              scriptType: 'pscore'
               scriptLocation: 'inlineScript'
               inlineScript: |
-                az acr create \
-                  --resource-group $(AcrResourceGroup) \
-                  --name $(AcrName) \
-                  --sku Basic \
-                  --admin-enabled true \
-                  --tags environment=prod app=mapbox \
-                  2>/dev/null || echo "ACR already exists or creation in progress"
+                az acr create `
+                  --resource-group $(AcrResourceGroup) `
+                  --name $(AcrName) `
+                  --sku Basic `
+                  --admin-enabled true `
+                  --tags environment=prod app=mapbox `
+                  2>$null
+                if ($LASTEXITCODE -ne 0) { Write-Host "ACR already exists or creation in progress" }
 
           - task: AzureCLI@2
             displayName: 'Create Container Apps Environment (if not exists)'
             inputs:
               azureSubscription: '$(AzureServiceConnectionName)'
-              scriptType: 'bash'
+              scriptType: 'pscore'
               scriptLocation: 'inlineScript'
               inlineScript: |
                 # Check if environment already exists
-                ENV_EXISTS=$(az containerapp env show \
-                  --resource-group $(AcaResourceGroup) \
-                  --name $(AcaEnvironmentName) \
-                  --query name -o tsv 2>/dev/null || echo "")
+                $ENV_EXISTS = az containerapp env show `
+                  --resource-group $(AcaResourceGroup) `
+                  --name $(AcaEnvironmentName) `
+                  --query name -o tsv 2>$null
                 
-                if [ -z "$ENV_EXISTS" ]; then
-                  echo "Creating Container Apps environment..."
-                  az containerapp env create \
-                    --name $(AcaEnvironmentName) \
-                    --resource-group $(AcaResourceGroup) \
-                    --location eastus \
+                if ([string]::IsNullOrEmpty($ENV_EXISTS)) {
+                  Write-Host "Creating Container Apps environment..."
+                  az containerapp env create `
+                    --name $(AcaEnvironmentName) `
+                    --resource-group $(AcaResourceGroup) `
+                    --location eastus `
                     --tags environment=prod app=mapbox
-                else
-                  echo "Container Apps environment already exists"
-                fi
+                } else {
+                  Write-Host "Container Apps environment already exists"
+                }
 
   - stage: Build
     displayName: 'Build & Push Image'
@@ -106,7 +107,7 @@ stages:
             displayName: 'Login to ACR'
             inputs:
               azureSubscription: '$(AzureServiceConnectionName)'
-              scriptType: 'bash'
+              scriptType: 'pscore'
               scriptLocation: 'inlineScript'
               inlineScript: |
                 az acr login --name $(AcrName)
@@ -135,101 +136,111 @@ stages:
             displayName: 'Create/Update Container App'
             inputs:
               azureSubscription: '$(AzureServiceConnectionName)'
-              scriptType: 'bash'
+              scriptType: 'pscore'
               scriptLocation: 'inlineScript'
               inlineScript: |
                 # Check if app already exists
-                APP_EXISTS=$(az containerapp show \
-                  --resource-group $(AcaResourceGroup) \
-                  --name $(AcaAppName) \
-                  --query name -o tsv 2>/dev/null || echo "")
+                $APP_EXISTS = az containerapp show `
+                  --resource-group $(AcaResourceGroup) `
+                  --name $(AcaAppName) `
+                  --query name -o tsv 2>$null
                 
-                if [ -z "$APP_EXISTS" ]; then
-                  echo "Creating new Container App..."
-                  az containerapp create \
-                    --name $(AcaAppName) \
-                    --resource-group $(AcaResourceGroup) \
-                    --environment $(AcaEnvironmentName) \
-                    --image $(AcrLoginServer)/$(ImageRepository):$(ImageTag) \
-                    --target-port 80 \
-                    --ingress external \
-                    --min-replicas 1 \
-                    --max-replicas 3 \
-                    --cpu 0.5 \
-                    --memory 1.0Gi \
-                    --registry-server $(AcrLoginServer) \
-                    --registry-identity system \
+                if ([string]::IsNullOrEmpty($APP_EXISTS)) {
+                  Write-Host "Creating new Container App..."
+                  az containerapp create `
+                    --name $(AcaAppName) `
+                    --resource-group $(AcaResourceGroup) `
+                    --environment $(AcaEnvironmentName) `
+                    --image $(AcrLoginServer)/$(ImageRepository):$(ImageTag) `
+                    --target-port 80 `
+                    --ingress external `
+                    --min-replicas 1 `
+                    --max-replicas 3 `
+                    --cpu 0.5 `
+                    --memory 1.0Gi `
+                    --registry-server $(AcrLoginServer) `
+                    --registry-identity system `
                     --tags environment=prod app=mapbox
-                else
-                  echo "Updating existing Container App..."
-                  az containerapp update \
-                    --name $(AcaAppName) \
-                    --resource-group $(AcaResourceGroup) \
-                    --image $(AcrLoginServer)/$(ImageRepository):$(ImageTag) \
+                } else {
+                  Write-Host "Updating existing Container App..."
+                  az containerapp update `
+                    --name $(AcaAppName) `
+                    --resource-group $(AcaResourceGroup) `
+                    --image $(AcrLoginServer)/$(ImageRepository):$(ImageTag) `
                     --tags environment=prod app=mapbox
-                fi
+                }
 
           - task: AzureCLI@2
             displayName: 'Verify Container App Revision Health'
             inputs:
               azureSubscription: '$(AzureServiceConnectionName)'
-              scriptType: 'bash'
+              scriptType: 'pscore'
               scriptLocation: 'inlineScript'
               inlineScript: |
                 # Wait for revision to be ready (max 60 seconds)
-                echo "Waiting for Container App revision to be ready..."
-                for i in {1..12}; do
-                  REVISION_STATE=$(az containerapp revision list \
-                    --resource-group $(AcaResourceGroup) \
-                    --name $(AcaAppName) \
-                    --query "[0].properties.provisioningState" -o tsv)
+                Write-Host "Waiting for Container App revision to be ready..."
+                for ($i = 1; $i -le 12; $i++) {
+                  $REVISION_STATE = az containerapp revision list `
+                    --resource-group $(AcaResourceGroup) `
+                    --name $(AcaAppName) `
+                    --query "[0].properties.provisioningState" -o tsv
                   
-                  if [ "$REVISION_STATE" = "Provisioned" ]; then
-                    echo "Revision is ready!"
+                  if ($REVISION_STATE -eq "Provisioned") {
+                    Write-Host "Revision is ready!"
                     break
-                  fi
+                  }
                   
-                  echo "Revision state: $REVISION_STATE (attempt $i/12)"
-                  sleep 5
-                done
+                  Write-Host "Revision state: $REVISION_STATE (attempt $i/12)"
+                  Start-Sleep -Seconds 5
+                }
 
           - task: AzureCLI@2
             displayName: 'Get Container App FQDN and Test Health'
             inputs:
               azureSubscription: '$(AzureServiceConnectionName)'
-              scriptType: 'bash'
+              scriptType: 'pscore'
               scriptLocation: 'inlineScript'
               inlineScript: |
                 # Get app FQDN
-                FQDN=$(az containerapp show \
-                  --resource-group $(AcaResourceGroup) \
-                  --name $(AcaAppName) \
-                  --query properties.configuration.ingress.fqdn -o tsv)
+                $FQDN = az containerapp show `
+                  --resource-group $(AcaResourceGroup) `
+                  --name $(AcaAppName) `
+                  --query properties.configuration.ingress.fqdn -o tsv
                 
-                echo "##vso[task.setvariable variable=ACA_FQDN]$FQDN"
-                echo "Container App URL: https://$FQDN"
+                Write-Host "##vso[task.setvariable variable=ACA_FQDN]$FQDN"
+                Write-Host "Container App URL: https://$FQDN"
                 
                 # Test health endpoint
-                echo "Testing health endpoint..."
-                HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://$FQDN/health || echo "000")
+                Write-Host "Testing health endpoint..."
+                try {
+                  $response = Invoke-WebRequest -Uri "https://$FQDN/health" -Method Get -UseBasicParsing -ErrorAction Stop
+                  $HTTP_CODE = $response.StatusCode
+                } catch {
+                  $HTTP_CODE = 000
+                }
                 
-                if [ "$HTTP_CODE" = "200" ]; then
-                  echo "✓ Health check passed"
-                else
-                  echo "✗ Health check failed with HTTP $HTTP_CODE"
+                if ($HTTP_CODE -eq 200) {
+                  Write-Host "✓ Health check passed"
+                } else {
+                  Write-Host "✗ Health check failed with HTTP $HTTP_CODE"
                   exit 1
-                fi
+                }
                 
                 # Test main app
-                echo "Testing main app endpoint..."
-                HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://$FQDN/ || echo "000")
+                Write-Host "Testing main app endpoint..."
+                try {
+                  $response = Invoke-WebRequest -Uri "https://$FQDN/" -Method Get -UseBasicParsing -ErrorAction Stop
+                  $HTTP_CODE = $response.StatusCode
+                } catch {
+                  $HTTP_CODE = 000
+                }
                 
-                if [ "$HTTP_CODE" = "200" ]; then
-                  echo "✓ Main app endpoint responding with 200"
-                else
-                  echo "✗ Main app endpoint returned HTTP $HTTP_CODE"
+                if ($HTTP_CODE -eq 200) {
+                  Write-Host "✓ Main app endpoint responding with 200"
+                } else {
+                  Write-Host "✗ Main app endpoint returned HTTP $HTTP_CODE"
                   exit 1
-                fi
+                }
 
           - script: |
               echo "Deployment successful!"
