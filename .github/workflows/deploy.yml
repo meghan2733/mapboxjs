@@ -167,10 +167,16 @@ jobs:
               --registry-server ${{ env.ACR_LOGIN_SERVER }} \
               --registry-username "$ACR_USERNAME" \
               --registry-password "$ACR_PASSWORD" \
+              --secrets mapbox-access-token="${{ secrets.MAPBOX_ACCESS_TOKEN }}" \
+              --env-vars MAPBOX_ACCESS_TOKEN=secretref:mapbox-access-token \
               --tags environment=prod app=mapbox
             echo "✓ Container App created"
           else
             echo "Updating existing Container App..."
+            az containerapp secret set \
+              --name ${{ env.ACA_APP_NAME }} \
+              --resource-group ${{ env.ACA_RESOURCE_GROUP }} \
+              --secrets mapbox-access-token="${{ secrets.MAPBOX_ACCESS_TOKEN }}"
             az containerapp registry set \
               --name ${{ env.ACA_APP_NAME }} \
               --resource-group ${{ env.ACA_RESOURCE_GROUP }} \
@@ -181,6 +187,7 @@ jobs:
               --name ${{ env.ACA_APP_NAME }} \
               --resource-group ${{ env.ACA_RESOURCE_GROUP }} \
               --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.run_id }} \
+              --set-env-vars MAPBOX_ACCESS_TOKEN=secretref:mapbox-access-token \
               --tags environment=prod app=mapbox
             echo "✓ Container App updated"
           fi
