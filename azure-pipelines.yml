@@ -1,21 +1,234 @@
-# Node.js
-# Build a general Node.js project with npm.
-# Add steps that analyze code, save build artifacts, deploy, and more:
-# https://docs.microsoft.com/azure/devops/pipelines/languages/javascript
+# Docker build, ACR push, and Azure Container Apps deployment pipeline
+# Builds Vite app, containerizes with Nginx, pushes to ACR, provisions Azure resources, and deploys to ACA
 
 trigger:
-- main
+  - main
 
 pool:
   vmImage: ubuntu-latest
 
-steps:
-- task: NodeTool@0
-  inputs:
-    versionSpec: '20.x'
-  displayName: 'Install Node.js'
+variables:
+  # Azure Service Connection name (configure in Project Settings > Service Connections)
+  AzureServiceConnectionName: 'Azure Subscription'
+  
+  # ACR Configuration
+  AcrSubscription: 'Azure Subscription'
+  AcrResourceGroup: 'rg-mapbox-prod'
+  AcrName: 'acrmapboxprod'
+  AcrLoginServer: 'acrmapboxprod.azurecr.io'
+  ImageRepository: 'mapbox-app'
+  
+  # Container Apps Configuration
+  AcaResourceGroup: 'rg-mapbox-prod'
+  AcaEnvironmentName: 'aca-env-mapbox'
+  AcaAppName: 'aca-mapbox-app'
+  
+  # Image tags
+  ImageTag: '$(Build.BuildId)'
+  ImageTagLatest: 'latest'
 
-- script: |
-    npm install
-    npm run build
-  displayName: 'npm install and build'
+stages:
+  - stage: ProvisionAzure
+    displayName: 'Provision Azure Resources'
+    jobs:
+      - job: ProvisionResources
+        displayName: 'Create/Verify Azure Resources'
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Create Resource Group'
+            inputs:
+              azureSubscription: '$(AzureServiceConnectionName)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az group create \
+                  --name $(AcaResourceGroup) \
+                  --location eastus \
+                  --tags environment=prod app=mapbox
+
+          - task: AzureCLI@2
+            displayName: 'Create ACR (if not exists)'
+            inputs:
+              azureSubscription: '$(AzureServiceConnectionName)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az acr create \
+                  --resource-group $(AcrResourceGroup) \
+                  --name $(AcrName) \
+                  --sku Basic \
+                  --admin-enabled true \
+                  --tags environment=prod app=mapbox \
+                  2>/dev/null || echo "ACR already exists or creation in progress"
+
+          - task: AzureCLI@2
+            displayName: 'Create Container Apps Environment (if not exists)'
+            inputs:
+              azureSubscription: '$(AzureServiceConnectionName)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # Check if environment already exists
+                ENV_EXISTS=$(az containerapp env show \
+                  --resource-group $(AcaResourceGroup) \
+                  --name $(AcaEnvironmentName) \
+                  --query name -o tsv 2>/dev/null || echo "")
+                
+                if [ -z "$ENV_EXISTS" ]; then
+                  echo "Creating Container Apps environment..."
+                  az containerapp env create \
+                    --name $(AcaEnvironmentName) \
+                    --resource-group $(AcaResourceGroup) \
+                    --location eastus \
+                    --tags environment=prod app=mapbox
+                else
+                  echo "Container Apps environment already exists"
+                fi
+
+  - stage: Build
+    displayName: 'Build & Push Image'
+    dependsOn: ProvisionAzure
+    condition: succeeded()
+    jobs:
+      - job: BuildAndPush
+        displayName: 'Build Docker Image and Push to ACR'
+        steps:
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '20.x'
+            displayName: 'Install Node.js'
+
+          - script: |
+              npm install
+              npm run build
+            displayName: 'npm install and build'
+
+          - task: Docker@2
+            displayName: 'Login to ACR'
+            inputs:
+              command: 'login'
+              containerRegistry: '$(AcrSubscription)'
+
+          - task: Docker@2
+            displayName: 'Build and Push Image to ACR'
+            inputs:
+              command: 'buildAndPush'
+              repository: '$(ImageRepository)'
+              dockerfile: '$(Build.SourcesDirectory)/Dockerfile'
+              containerRegistry: '$(AcrSubscription)'
+              tags: |
+                $(ImageTag)
+                $(ImageTagLatest)
+
+  - stage: Deploy
+    displayName: 'Deploy to Container Apps'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - job: DeployApp
+        displayName: 'Deploy to Azure Container Apps'
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Create/Update Container App'
+            inputs:
+              azureSubscription: '$(AzureServiceConnectionName)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # Check if app already exists
+                APP_EXISTS=$(az containerapp show \
+                  --resource-group $(AcaResourceGroup) \
+                  --name $(AcaAppName) \
+                  --query name -o tsv 2>/dev/null || echo "")
+                
+                if [ -z "$APP_EXISTS" ]; then
+                  echo "Creating new Container App..."
+                  az containerapp create \
+                    --name $(AcaAppName) \
+                    --resource-group $(AcaResourceGroup) \
+                    --environment $(AcaEnvironmentName) \
+                    --image $(AcrLoginServer)/$(ImageRepository):$(ImageTag) \
+                    --target-port 80 \
+                    --ingress external \
+                    --min-replicas 1 \
+                    --max-replicas 3 \
+                    --cpu 0.5 \
+                    --memory 1.0Gi \
+                    --registry-server $(AcrLoginServer) \
+                    --registry-identity system \
+                    --tags environment=prod app=mapbox
+                else
+                  echo "Updating existing Container App..."
+                  az containerapp update \
+                    --name $(AcaAppName) \
+                    --resource-group $(AcaResourceGroup) \
+                    --image $(AcrLoginServer)/$(ImageRepository):$(ImageTag) \
+                    --tags environment=prod app=mapbox
+                fi
+
+          - task: AzureCLI@2
+            displayName: 'Verify Container App Revision Health'
+            inputs:
+              azureSubscription: '$(AzureServiceConnectionName)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # Wait for revision to be ready (max 60 seconds)
+                echo "Waiting for Container App revision to be ready..."
+                for i in {1..12}; do
+                  REVISION_STATE=$(az containerapp revision list \
+                    --resource-group $(AcaResourceGroup) \
+                    --name $(AcaAppName) \
+                    --query "[0].properties.provisioningState" -o tsv)
+                  
+                  if [ "$REVISION_STATE" = "Provisioned" ]; then
+                    echo "Revision is ready!"
+                    break
+                  fi
+                  
+                  echo "Revision state: $REVISION_STATE (attempt $i/12)"
+                  sleep 5
+                done
+
+          - task: AzureCLI@2
+            displayName: 'Get Container App FQDN and Test Health'
+            inputs:
+              azureSubscription: '$(AzureServiceConnectionName)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # Get app FQDN
+                FQDN=$(az containerapp show \
+                  --resource-group $(AcaResourceGroup) \
+                  --name $(AcaAppName) \
+                  --query properties.configuration.ingress.fqdn -o tsv)
+                
+                echo "##vso[task.setvariable variable=ACA_FQDN]$FQDN"
+                echo "Container App URL: https://$FQDN"
+                
+                # Test health endpoint
+                echo "Testing health endpoint..."
+                HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://$FQDN/health || echo "000")
+                
+                if [ "$HTTP_CODE" = "200" ]; then
+                  echo "✓ Health check passed"
+                else
+                  echo "✗ Health check failed with HTTP $HTTP_CODE"
+                  exit 1
+                fi
+                
+                # Test main app
+                echo "Testing main app endpoint..."
+                HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://$FQDN/ || echo "000")
+                
+                if [ "$HTTP_CODE" = "200" ]; then
+                  echo "✓ Main app endpoint responding with 200"
+                else
+                  echo "✗ Main app endpoint returned HTTP $HTTP_CODE"
+                  exit 1
+                fi
+
+          - script: |
+              echo "Deployment successful!"
+              echo "Access your app at: https://$(ACA_FQDN)"
+            displayName: 'Deployment Summary'
