@@ -178,7 +178,7 @@ jobs:
               --name ${{ env.ACA_APP_NAME }} `
               --resource-group ${{ env.ACA_RESOURCE_GROUP }} `
               --environment ${{ env.ACA_ENVIRONMENT_NAME }} `
-              --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:latest `
+              --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.run_id }} `
               --target-port 80 `
               --ingress external `
               --min-replicas 1 `
@@ -207,7 +207,7 @@ jobs:
             az containerapp update `
               --name ${{ env.ACA_APP_NAME }} `
               --resource-group ${{ env.ACA_RESOURCE_GROUP }} `
-              --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:latest `
+              --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.run_id }} `
               --set-env-vars MAPBOX_ACCESS_TOKEN=secretref:mapbox-access-token `
               --tags environment=prod app=mapbox
             Write-Host "✓ Container App updated"
@@ -216,20 +216,37 @@ jobs:
       - name: Verify Container App Revision Health
         shell: pwsh
         run: |
-          Write-Host "Waiting for Container App revision to be ready (max 60 seconds)..."
-          for ($i = 1; $i -le 12; $i++) {
-            $revisionState = az containerapp revision list `
+          Write-Host "Waiting for the latest revision to become the ready revision (max 180 seconds)..."
+          $isReady = $false
+
+          for ($i = 1; $i -le 36; $i++) {
+            $appState = az containerapp show `
               --resource-group ${{ env.ACA_RESOURCE_GROUP }} `
               --name ${{ env.ACA_APP_NAME }} `
-              --query "[0].properties.provisioningState" -o tsv
-            
-            if ($revisionState -eq "Provisioned") {
-              Write-Host "✓ Revision is ready!"
+              --query "{latestRevisionName:properties.latestRevisionName,latestReadyRevisionName:properties.latestReadyRevisionName,image:properties.template.containers[0].image}" `
+              -o json | ConvertFrom-Json
+
+            Write-Host "  Latest revision: $($appState.latestRevisionName)"
+            Write-Host "  Latest ready revision: $($appState.latestReadyRevisionName)"
+            Write-Host "  Configured image: $($appState.image)"
+
+            if (-not [string]::IsNullOrEmpty($appState.latestRevisionName) -and $appState.latestRevisionName -eq $appState.latestReadyRevisionName) {
+              Write-Host "✓ Latest revision is ready and serving traffic"
+              $isReady = $true
               break
             }
-            
-            Write-Host "  Revision state: $revisionState (attempt $i/12)"
+
             Start-Sleep -Seconds 5
+          }
+
+          if (-not $isReady) {
+            Write-Host "Latest revision never became the ready revision. Recent revisions:"
+            az containerapp revision list `
+              --resource-group ${{ env.ACA_RESOURCE_GROUP }} `
+              --name ${{ env.ACA_APP_NAME }} `
+              --query "[].{name:name,active:properties.active,healthState:properties.healthState,runningState:properties.runningState,createdTime:properties.createdTime,image:properties.template.containers[0].image}" `
+              -o table
+            throw "Deployment completed, but the new revision is not the ready revision."
           }
 
       - name: Get Container App FQDN
@@ -249,7 +266,7 @@ jobs:
           Write-Host "=========================================="
           Write-Host "✓ Deployment Successful!"
           Write-Host "=========================================="
-          Write-Host "App URL: https://${{ env.ACA_FQDN }}"
+          Write-Host "App URL: https://$env:ACA_FQDN"
           Write-Host "Container App: ${{ env.ACA_APP_NAME }}"
           Write-Host "Resource Group: ${{ env.ACA_RESOURCE_GROUP }}"
           Write-Host "Image: ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.run_id }}"
