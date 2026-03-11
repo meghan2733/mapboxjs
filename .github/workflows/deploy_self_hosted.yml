@@ -255,29 +255,29 @@ jobs:
           Write-Host "Image: ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.run_id }}"
           Write-Host "=========================================="
 
-  cleanup:
-    name: Cleanup Runner Artifacts
-    needs: deploy-app
-    if: always()
-    runs-on: self-hosted
-    steps:
-      - name: Cleanup local build artifacts
-        shell: pwsh
-        run: |
-          Write-Host "Cleaning local build artifacts on self-hosted runner..."
+  # cleanup:
+  #   name: Cleanup Runner Artifacts
+  #   needs: deploy-app
+  #   if: always()
+  #   runs-on: self-hosted
+  #   steps:
+  #     - name: Cleanup local build artifacts
+  #       shell: pwsh
+  #       run: |
+  #         Write-Host "Cleaning local build artifacts on self-hosted runner..."
 
-          if (Test-Path "./dist") {
-            Remove-Item -Recurse -Force "./dist"
-          }
+  #         if (Test-Path "./dist") {
+  #           Remove-Item -Recurse -Force "./dist"
+  #         }
 
-          if (Test-Path "./node_modules") {
-            Remove-Item -Recurse -Force "./node_modules"
-          }
+  #         if (Test-Path "./node_modules") {
+  #           Remove-Item -Recurse -Force "./node_modules"
+  #         }
 
-          docker rmi ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.run_id }} 2>$null
-          docker rmi ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:latest 2>$null
+  #         docker rmi ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.run_id }} 2>$null
+  #         docker rmi ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:latest 2>$null
 
-          docker image prune -f --filter "until=24h"
-          docker builder prune -f --filter "until=24h"
+  #         docker image prune -f --filter "until=24h"
+  #         docker builder prune -f --filter "until=24h"
 
-          Write-Host "✓ Runner cleanup completed"
+  #         Write-Host "✓ Runner cleanup completed"
