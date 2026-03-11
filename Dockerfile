@@ -24,7 +24,8 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # Generate runtime config for the frontend from container env vars.
 COPY docker-entrypoint.d/40-generate-env-js.sh /docker-entrypoint.d/40-generate-env-js.sh
-RUN chmod +x /docker-entrypoint.d/40-generate-env-js.sh
+RUN sed -i 's/\r$//' /docker-entrypoint.d/40-generate-env-js.sh \
+  && chmod +x /docker-entrypoint.d/40-generate-env-js.sh
 
 # Copy built app from builder stage
 COPY --from=builder /app/dist /usr/share/nginx/html
